@@ -1,13 +1,21 @@
 """
 Planilla de Carga — Beccacece Hnos SA
-Generador automático v3.3 | Streamlit + ReportLab
-Cambios v3.3:
-  - Título: "PLANILLA DE CARGA | Reparto Nro: X | Fecha: DD/MM/YYYY" (1 línea)
-  - Transporte y Depósito en dos columnas separadas
-  - Partida y Regreso en dos columnas separadas
-  - Soporte multi-página por cancha (overflow automático)
+Generador automático v3.4 | Streamlit + ReportLab
+
+Cambios v3.3 → v3.4 (FIX CRÍTICO DE CANCHAS):
+  - Hoja API: la cancha NO se lee más por nombre 'CANCHA.1' desde columnas A-H.
+    Ahora se construye así:
+      1) Cruce SKU → almacén usando columna A ('Artículo') y la columna numérica
+         de almacén (típicamente 'almacén').
+      2) Tabla maestra de ALMACENES leída del bloque I:M (header en fila 1):
+         I=Nº Almacén | J=Detalle | K=Calibre | L=Apilabilidad | M=Cancha
+      3) Cada SKU hereda la cancha del almacén al que pertenece.
+  - SKU normalizado a entero antes de comparar (fix '12345' vs '12345.0' vs ' 12345 ').
+  - drop_duplicates determinista: prevalece la última fila con datos válidos.
+  - Debug expander con tabla SKU → Almacén → Cancha y headers reales detectados.
+  - Lectura de headers en runtime (tolerante a tildes y variantes).
 """
-import io, math, hashlib
+import io, math, hashlib, unicodedata
 from datetime import datetime
 
 import pandas as pd
@@ -22,20 +30,20 @@ PAGE_W, PAGE_H = A4
 MARGIN  = 12 * mm
 CW      = PAGE_W - 2 * MARGIN
 
-H_TITLE     = 26   # barra azul con título
-H_TRANS     = 18   # línea Transporte | Depósito
-H_PARTIDA   = 16   # línea Partida | Regreso (solo CANCHA I 1.ª hoja)
-H_CTRL      = 56   # CONTROL DE CARGA (solo CANCHA I 1.ª hoja)
-H_LEMA      = 18   # barra lema
-H_CANCHA    = 20   # barra nombre cancha
-H_THDR      = 14   # cabecera tabla
-H_ALM       = 16   # fila almacén
-H_ROW       = 14   # fila producto
-H_TOT       = 14   # fila total almacén
-H_ESPACIO   = 62   # caja ESPACIO ASIGNADO
-H_ROUTE     = 16   # línea ruteo (opcional)
-H_FOOT      = 28   # pie de página
-GAP         = 2    # separador estándar
+H_TITLE     = 26
+H_TRANS     = 18
+H_PARTIDA   = 16
+H_CTRL      = 56
+H_LEMA      = 18
+H_CANCHA    = 20
+H_THDR      = 14
+H_ALM       = 16
+H_ROW       = 14
+H_TOT       = 14
+H_ESPACIO   = 62
+H_ROUTE     = 16
+H_FOOT      = 28
+GAP         = 2
 
 # ─── COLORES ────────────────────────────────────────────────────────────────
 DARK_BLUE  = colors.HexColor('#1a3a6b')
@@ -56,7 +64,7 @@ ALM_BG     = colors.HexColor('#DDEEFF')
 EXCLUDED_SKUS = {2730, 2731, 2776, 2780, 5192}
 EXCLUDED_PATS = ['Q CERVEZAS', 'Q PLAS', 'BOT 1/1', 'BOT AMBAR', 'ARACELI']
 CANCHA_ORDER  = ['CANCHA I', 'CANCHA II', 'CANCHA III', 'CANCHA IV', 'CANCHA V']
-COL_W = [50, CW - 50 - 62 - 52 - 52, 62, 52, 52]  # SKU | Desc | Venc | Bultos | Unids
+COL_W = [50, CW - 50 - 62 - 52 - 52, 62, 52, 52]
 
 LEMAS = [
     "Cada bulto bien puesto es una entrega perfecta. Dale con todo!",
@@ -91,16 +99,61 @@ LEMAS = [
     "Ultima caja, mismo cuidado que la primera. Asi se hace el trabajo bien hecho.",
 ]
 
-# ─── DATA ───────────────────────────────────────────────────────────────────
+# ─── UTILIDADES ─────────────────────────────────────────────────────────────
+
+def _norm(s):
+    """Normaliza string: sin tildes, sin espacios extra, lowercase."""
+    if s is None: return ''
+    s = str(s).strip()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    return s.lower()
+
+def find_col(df, *candidates):
+    """Busca columna en df por nombre normalizado (tolerante a tildes/case)."""
+    norm_map = {_norm(c): c for c in df.columns}
+    for cand in candidates:
+        c = _norm(cand)
+        if c in norm_map:
+            return norm_map[c]
+    return None
+
+def to_int_sku(val):
+    """Convierte SKU a int de forma robusta. Devuelve None si no se puede."""
+    if val is None: return None
+    if isinstance(val, float) and math.isnan(val): return None
+    try:
+        s = str(val).strip()
+        if s in ('', 'nan', 'NaN', 'None'): return None
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
 
 def is_envase(sku, desc):
-    if sku in EXCLUDED_SKUS:
-        return True
+    if sku in EXCLUDED_SKUS: return True
     d = str(desc).upper()
     for p in EXCLUDED_PATS:
-        if p in d:
-            return True
+        if p in d: return True
     return d.strip() == 'RET'
+
+def normalize_cancha(val):
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return 'SIN CANCHA'
+    s = str(val).strip().upper()
+    if s in ('', '0', 'NAN', 'NONE'): return 'SIN CANCHA'
+    # Eliminar tildes
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    MAP = {'CANCHA I':'CANCHA I','CANCHA II':'CANCHA II','CANCHA III':'CANCHA III',
+           'CANCHA IV':'CANCHA IV','CANCHA V':'CANCHA V',
+           'MKPL':'CANCHA V','MERCH':'CANCHA V','MERCHANDISING':'CANCHA V',
+           'MARKETPLACE':'CANCHA V'}
+    # Match exacto primero
+    if s in MAP: return MAP[s]
+    # Match por prefijo (más específico primero)
+    for k in sorted(MAP.keys(), key=len, reverse=True):
+        if s.startswith(k): return MAP[k]
+    return 'SIN CANCHA'
+
+# ─── CARGA DE DATOS ─────────────────────────────────────────────────────────
 
 def load_car(file):
     df = pd.read_excel(file, sheet_name=0)
@@ -113,36 +166,108 @@ def load_car(file):
     return df
 
 def load_frescura(file):
+    """
+    FIX v3.4 — Construcción correcta de cancha por SKU:
+      1) Lee la hoja API completa.
+      2) SKU está en columna A ('Artículo'). Cada SKU tiene un Nº de almacén
+         (columna 'almacén' o similar).
+      3) Lee el bloque I:M de la misma hoja API (tabla maestra de almacenes):
+         I=Nº Almacén | J=Detalle | K=Calibre | L=Apilabilidad | M=Cancha
+      4) Mergea SKU → Nº Almacén → Cancha.
+    """
     xls = pd.ExcelFile(file)
-    api = pd.read_excel(xls, sheet_name='API')[['Artículo','CANCHA.1','almacén','detalle']].copy()
-    api.columns = ['sku','cancha','alm_id','alm_det']
-    api['sku'] = pd.to_numeric(api['sku'], errors='coerce')
-    api = api.dropna(subset=['sku']); api['sku'] = api['sku'].astype(int)
-    api = api.drop_duplicates(subset=['sku'])
 
-    ddm = pd.read_excel(xls, sheet_name='DDM')[['ARTÍCULO','BULTOS X PALLET']].copy()
-    ddm.columns = ['sku','bxp']
-    ddm['sku'] = pd.to_numeric(ddm['sku'], errors='coerce')
-    ddm = ddm.dropna(subset=['sku']); ddm['sku'] = ddm['sku'].astype(int)
-    ddm = ddm.drop_duplicates(subset=['sku'])
+    # ── HOJA API: lectura completa ──────────────────────────────────────────
+    api_full = pd.read_excel(xls, sheet_name='API', header=0)
 
-    fr = pd.read_excel(xls, sheet_name='Frescura')[['Cód','FECHA DE VENC.','Status']].copy()
-    fr.columns = ['sku','fecha','status']
-    fr['sku'] = pd.to_numeric(fr['sku'], errors='coerce')
-    fr = fr.dropna(subset=['sku']); fr['sku'] = fr['sku'].astype(int)
-    fr = fr.sort_values('fecha').drop_duplicates(subset=['sku'])
-    return api, ddm, fr
+    # Columna SKU (col A)
+    col_sku = find_col(api_full, 'Artículo', 'Articulo', 'SKU', 'Cód', 'Cod')
+    if col_sku is None:
+        raise ValueError("Hoja API: no se encontró la columna de SKU (Artículo).")
 
-def normalize_cancha(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)):
-        return 'SIN CANCHA'
-    s = str(val).strip().upper()
-    if s in ('', '0', 'NAN'): return 'SIN CANCHA'
-    MAP = {'CANCHA I':'CANCHA I','CANCHA II':'CANCHA II','CANCHA III':'CANCHA III',
-           'CANCHA IV':'CANCHA IV','CANCHA V':'CANCHA V','MKPL':'CANCHA V','MERCH':'CANCHA V'}
-    for k, v in MAP.items():
-        if s == k or s.startswith(k): return v
-    return 'SIN CANCHA'
+    # Columna almacén por SKU (entre A y H, la que asocia SKU con su almacén)
+    col_alm_sku = find_col(api_full, 'almacén', 'almacen', 'Almacén', 'Almacen', 'Alm')
+    if col_alm_sku is None:
+        raise ValueError("Hoja API: no se encontró la columna 'almacén' que asocia SKU con almacén.")
+
+    # Tabla SKU → Nº Almacén
+    sku_alm = api_full[[col_sku, col_alm_sku]].copy()
+    sku_alm.columns = ['sku_raw', 'alm_num_raw']
+    sku_alm['sku'] = sku_alm['sku_raw'].apply(to_int_sku)
+    sku_alm['alm_num'] = pd.to_numeric(sku_alm['alm_num_raw'], errors='coerce')
+    sku_alm = sku_alm.dropna(subset=['sku'])
+    sku_alm['sku'] = sku_alm['sku'].astype(int)
+    # Regla de prevalencia: la última fila con almacén válido prevalece
+    sku_alm = sku_alm.dropna(subset=['alm_num'])
+    sku_alm['alm_num'] = sku_alm['alm_num'].astype(int)
+    sku_alm = sku_alm.drop_duplicates(subset=['sku'], keep='last')[['sku', 'alm_num']]
+
+    # ── BLOQUE I:M (tabla maestra de almacenes), header en fila 1 ───────────
+    # usecols='I:M', header=0 → lee solo las cols I-M con su header propio.
+    alm_master = pd.read_excel(
+        xls, sheet_name='API', header=0, usecols='I:M'
+    )
+    # Mapeo posicional según definición del usuario:
+    # I = Nº Almacén | J = Detalle | K = Calibre | L = Apilabilidad | M = Cancha
+    if alm_master.shape[1] < 5:
+        raise ValueError(
+            f"Bloque I:M de la hoja API tiene {alm_master.shape[1]} columnas, se esperaban 5."
+        )
+    alm_master = alm_master.iloc[:, :5].copy()
+    alm_master.columns = ['alm_num', 'alm_det', 'calibre', 'apil', 'cancha_raw']
+    alm_master['alm_num'] = pd.to_numeric(alm_master['alm_num'], errors='coerce')
+    alm_master = alm_master.dropna(subset=['alm_num'])
+    alm_master['alm_num'] = alm_master['alm_num'].astype(int)
+    # Prevalece la última definición del almacén
+    alm_master = alm_master.drop_duplicates(subset=['alm_num'], keep='last')
+
+    # ── MERGE: SKU → Almacén → Cancha ───────────────────────────────────────
+    api = sku_alm.merge(alm_master, on='alm_num', how='left')
+    api['cancha'] = api['cancha_raw'].apply(normalize_cancha)
+    api = api.rename(columns={'alm_num': 'alm_id'})
+    api['alm_det'] = api['alm_det'].fillna('sin datos').astype(str)
+    api = api[['sku', 'cancha', 'alm_id', 'alm_det']]
+
+    # ── HOJA DDM (Bultos por pallet) ────────────────────────────────────────
+    ddm_full = pd.read_excel(xls, sheet_name='DDM')
+    col_ddm_sku = find_col(ddm_full, 'ARTÍCULO', 'ARTICULO', 'Artículo', 'Articulo', 'SKU')
+    col_bxp     = find_col(ddm_full, 'BULTOS X PALLET', 'BULTOS_X_PALLET', 'BXP')
+    if not col_ddm_sku or not col_bxp:
+        raise ValueError("Hoja DDM: no se encontraron las columnas ARTÍCULO y/o BULTOS X PALLET.")
+    ddm = ddm_full[[col_ddm_sku, col_bxp]].copy()
+    ddm.columns = ['sku', 'bxp']
+    ddm['sku'] = ddm['sku'].apply(to_int_sku)
+    ddm = ddm.dropna(subset=['sku'])
+    ddm['sku'] = ddm['sku'].astype(int)
+    ddm['bxp'] = pd.to_numeric(ddm['bxp'], errors='coerce')
+    ddm = ddm.drop_duplicates(subset=['sku'], keep='last')
+
+    # ── HOJA Frescura ───────────────────────────────────────────────────────
+    fr_full = pd.read_excel(xls, sheet_name='Frescura')
+    col_fr_sku    = find_col(fr_full, 'Cód', 'Cod', 'SKU', 'Artículo', 'Articulo')
+    col_fr_fecha  = find_col(fr_full, 'FECHA DE VENC.', 'FECHA DE VENC', 'Fecha de Venc', 'Vencimiento')
+    col_fr_status = find_col(fr_full, 'Status', 'Estado')
+    if not all([col_fr_sku, col_fr_fecha, col_fr_status]):
+        raise ValueError("Hoja Frescura: faltan columnas Cód / FECHA DE VENC. / Status.")
+    fr = fr_full[[col_fr_sku, col_fr_fecha, col_fr_status]].copy()
+    fr.columns = ['sku', 'fecha', 'status']
+    fr['sku'] = fr['sku'].apply(to_int_sku)
+    fr = fr.dropna(subset=['sku'])
+    fr['sku'] = fr['sku'].astype(int)
+    fr = fr.sort_values('fecha').drop_duplicates(subset=['sku'], keep='first')
+
+    # Diagnóstico para debug
+    diag = {
+        'api_full_cols': list(api_full.columns),
+        'col_sku_used': col_sku,
+        'col_alm_sku_used': col_alm_sku,
+        'alm_master_cols_raw': list(pd.read_excel(xls, sheet_name='API', header=0, usecols='I:M').columns),
+        'sku_count_api': len(api),
+        'alm_master_count': len(alm_master),
+        'sku_sin_cancha': int((api['cancha'] == 'SIN CANCHA').sum()),
+        'alm_master_preview': alm_master.head(20).to_dict('records'),
+    }
+    return api, ddm, fr, diag
 
 def get_lema(transport, idx=0):
     h = int(hashlib.md5(str(transport).encode()).hexdigest(), 16)
@@ -171,15 +296,11 @@ def process_reparto(rep_df, api, ddm, fr):
 
         a = api[api['sku'] == sku]
         if len(a):
-            cancha_raw = a.iloc[0]['cancha']
-            alm_id     = a.iloc[0]['alm_id']
-            alm_det    = str(a.iloc[0]['alm_det']) if pd.notna(a.iloc[0]['alm_det']) else 'sin datos'
+            cancha     = str(a.iloc[0]['cancha'])
+            alm_id_i   = int(a.iloc[0]['alm_id']) if pd.notna(a.iloc[0]['alm_id']) else None
+            alm_det    = str(a.iloc[0]['alm_det'])
         else:
-            cancha_raw, alm_id, alm_det = None, None, 'sin datos'
-
-        cancha = normalize_cancha(cancha_raw)
-        try:   alm_id_i = int(float(alm_id)) if pd.notna(alm_id) else None
-        except: alm_id_i = None
+            cancha, alm_id_i, alm_det = 'SIN CANCHA', None, 'sin datos'
 
         d = ddm[ddm['sku'] == sku]
         bxp = float(d.iloc[0]['bxp']) if len(d) and pd.notna(d.iloc[0]['bxp']) else None
@@ -208,7 +329,6 @@ def process_reparto(rep_df, api, ddm, fr):
     return rows
 
 def build_alm_groups(c_rows):
-    """Returns list of (alm_id, alm_det, rows) ordered by first appearance, rows sorted by blts_raw desc."""
     groups = {}; order = []
     for r in c_rows:
         key = (r['alm_id'], r['alm_det'])
@@ -224,7 +344,7 @@ def compute_pall_value(rows, cancha):
 
 # ─── DRAWING HELPERS ─────────────────────────────────────────────────────────
 
-def ry(y_top): return PAGE_H - y_top   # top-down → ReportLab bottom-up
+def ry(y_top): return PAGE_H - y_top
 
 def rfill(c, x, y_top, w, h, fill, stroke=None, lw=0.4):
     c.setFillColor(fill)
@@ -238,7 +358,6 @@ def txt(c, x, y_top, s, font='Helvetica', sz=8, col=colors.black, align='left', 
     c.setFont(font, sz); c.setFillColor(col)
     if mw:
         while s and c.stringWidth(s, font, sz) > mw: s = s[:-1]
-        if s != s: s += '…'   # truncated
     fn = {'left': c.drawString, 'center': c.drawCentredString, 'right': c.drawRightString}[align]
     fn(x, ry(y_top), s)
 
@@ -250,37 +369,29 @@ def draw_watermark(c):
     c.drawCentredString(0, 0, 'BECCACECE HNOS')
     c.restoreState()
 
-# ─── ELEMENTOS DE ENCABEZADO ─────────────────────────────────────────────────
-
 def draw_title_bar(c, y, numero, fecha_str):
-    """Barra azul oscura — 1 sola línea centrada. Retorna altura."""
     rfill(c, MARGIN, y, CW, H_TITLE, DARK_BLUE)
     label = f'PLANILLA DE CARGA  |  Reparto Nro: {numero}  |  Fecha: {fecha_str}'
     txt(c, MARGIN+CW/2, y+17, label, 'Helvetica-Bold', 9.5, colors.white, 'center', CW-16)
     return H_TITLE
 
 def draw_transport_line(c, y, transport, chofer):
-    """Línea Transporte (izq) + Depósito (der). Sin borde."""
     rfill(c, MARGIN, y, CW, H_TRANS, colors.HexColor('#EEF2F8'))
     txt(c, MARGIN+6,      y+12, f'Transporte: {transport} - {chofer}', 'Helvetica-Bold', 8)
     txt(c, MARGIN+CW-6,   y+12, 'Depósito: 001 - CASA CENTRAL',        'Helvetica-Bold', 8, align='right')
     return H_TRANS
 
 def draw_partida_regreso(c, y):
-    """Dos columnas: Partida (izq) | Regreso (der)."""
     txt(c, MARGIN+6,     y+11, 'F. y H. Est. de Partida: ________ Hs.', 'Helvetica', 8)
     txt(c, MARGIN+CW-6,  y+11, 'F. y H. Est. de Regreso: ________ Hs.','Helvetica', 8, align='right')
     return H_PARTIDA
 
 def draw_control_carga(c, y):
-    """Cabecera CONTROL DE CARGA | CONTROL DE DESCARGA + caja de firma."""
     hdr_h = 15; box_h = H_CTRL - hdr_h; half = CW/2
-    # Cabeceras
     rfill(c, MARGIN,        y, half, hdr_h, HDR_BG, BORDER)
     rfill(c, MARGIN+half,   y, half, hdr_h, HDR_BG, BORDER)
     txt(c, MARGIN+half/2,         y+10, 'CONTROL DE CARGA',    'Helvetica-Bold', 8, align='center')
     txt(c, MARGIN+half+half/2,    y+10, 'CONTROL DE DESCARGA', 'Helvetica-Bold', 8, align='center')
-    # Caja vacía para firmas
     c.setStrokeColor(BORDER); c.setLineWidth(0.4)
     c.rect(MARGIN, ry(y+hdr_h+box_h), CW, box_h, fill=0, stroke=1)
     c.line(MARGIN+half, ry(y+hdr_h), MARGIN+half, ry(y+hdr_h+box_h))
@@ -342,7 +453,6 @@ def draw_product_row(c, y, r):
             txt(c, x+w/2, y+9.5, s, font, 7, align='center', mw=w-3)
         else:
             txt(c, x+3,   y+9.5, s, font, 7, mw=w-5)
-        # subrayado paleta pura en columna Bultos
         if r['has_pal'] and align=='center' and s==bp_s:
             tw = c.stringWidth(s, font, 7)
             cx = x+w/2
@@ -403,8 +513,6 @@ def draw_footer(c, date_str, page_num):
     txt(c, MARGIN,    yb+16, date_str,           'Helvetica', 7, FOOT_GRAY)
     txt(c, MARGIN+CW, yb+16, f'Página: {page_num}','Helvetica', 7, FOOT_GRAY, 'right')
 
-# ─── ALTURA DE ENCABEZADO POR PÁGINA ────────────────────────────────────────
-
 def header_height(is_first_rep_page: bool) -> float:
     h = H_TITLE + GAP + H_TRANS + GAP
     if is_first_rep_page:
@@ -421,27 +529,18 @@ def content_avail(is_first_rep_page: bool, has_route: bool) -> float:
 def alm_group_height(n_rows: int) -> float:
     return GAP + H_ALM + n_rows*H_ROW + H_TOT
 
-# ─── MULTI-PAGE CANCHA ───────────────────────────────────────────────────────
-
 def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
                        chofer, lema, fecha_str, date_str, pc,
                        pall_values, route_dest, receives_route):
-    """
-    Dibuja 1 o más páginas para una cancha.
-    pc = {'n': page_count} (mutable dict para pasar por referencia)
-    """
     c_rows     = [r for r in reparto_rows if r['cancha'] == cancha]
     alm_groups = build_alm_groups(c_rows)
 
-    # ── Distribuir grupos en páginas ────────────────────────────────────────
-    remaining = list(alm_groups)   # [(alm_id, alm_det, rows), ...]
-    pages     = []                 # [(is_frp, groups_in_page)]
+    remaining = list(alm_groups)
+    pages     = []
     first_pg  = True
 
     while True:
         is_frp    = is_first_rep and first_pg
-        # La ruta sólo va en la última página (aún no sabemos si esta es la última)
-        # Calculamos con has_route=False para ser conservadores en la asignación
         avail     = content_avail(is_frp, has_route=False)
         used      = 0
         pg_groups = []
@@ -449,7 +548,7 @@ def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
         for g in remaining[:]:
             gh = alm_group_height(len(g[2]))
             if used + gh > avail and pg_groups:
-                break          # no entra, guardar para siguiente página
+                break
             pg_groups.append(remaining.pop(0))
             used += gh
 
@@ -458,7 +557,6 @@ def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
         if not remaining:
             break
 
-    # ── Dibujar cada página ─────────────────────────────────────────────────
     n_pages = len(pages)
     for pi, (is_frp, pg_groups) in enumerate(pages):
         is_last = (pi == n_pages - 1)
@@ -485,7 +583,6 @@ def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
         y += draw_table_header(c, y)
 
         if not pg_groups and not c_rows:
-            # Cancha vacía
             txt(c, MARGIN+CW/2, y+13, f'— Sin carga de {cancha} para este camión —',
                 'Helvetica-Oblique', 8, colors.HexColor('#888888'), 'center')
         else:
@@ -498,7 +595,6 @@ def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
                                     sum(r['blts_pick'] for r in rows),
                                     sum(r['unids']     for r in rows))
 
-        # Pie anclado al fondo — sólo en última página de la cancha
         if is_last:
             pv = pall_values.get(cancha, 0.0)
             route_h   = H_ROUTE if has_rt else 0
@@ -540,9 +636,8 @@ def draw_sin_cancha_page(c, row, numero, transport, chofer, lema, fecha_str, dat
 def generate_pdf(car_df, api, ddm, fr):
     buf = io.BytesIO()
     c   = rl_canvas.Canvas(buf, pagesize=A4)
-    pc  = {'n': 0}   # page counter (mutable)
+    pc  = {'n': 0}
 
-    # Fecha del reporte
     if 'Fecha Mvto' in car_df.columns and len(car_df):
         try:
             dt = pd.Timestamp(car_df['Fecha Mvto'].dropna().iloc[0])
@@ -553,7 +648,8 @@ def generate_pdf(car_df, api, ddm, fr):
         fecha_str = date_str = datetime.today().strftime('%d/%m/%Y')
 
     stats = {'repartos':[], 'red':[], 'yellow':[], 'pallet_applied':[],
-             'miss_bxp':[], 'no_fecha':[], 'sin_cancha_skus':[], 'total_pages':0}
+             'miss_bxp':[], 'no_fecha':[], 'sin_cancha_skus':[],
+             'total_pages':0, 'trace':[]}
 
     for rep_idx, (numero, rep_df) in enumerate(car_df.groupby('Número', sort=False)):
         transport = str(rep_df['Transporte'].iloc[0])
@@ -564,7 +660,16 @@ def generate_pdf(car_df, api, ddm, fr):
         rows        = process_reparto(rep_df, api, ddm, fr)
         pall_values = {ch: compute_pall_value(rows, ch) for ch in CANCHA_ORDER}
 
-        # Ruteo CANCHA I
+        # Trazabilidad de cancha por SKU para el debug
+        for r in rows:
+            stats['trace'].append({
+                'Reparto': numero, 'Camión': transport,
+                'SKU': r['sku'], 'Descripción': r['desc'][:50],
+                'Almacén': r['alm_id'], 'Detalle Almacén': r['alm_det'],
+                'Cancha': r['cancha'], 'Bultos CAR': r['blts_raw'],
+                'A pickear': r['blts_pick'],
+            })
+
         pv1 = pall_values['CANCHA I']; frac1 = pv1 - int(pv1)
         if frac1 > 0.001:
             pv2, pv4 = pall_values['CANCHA II'], pall_values['CANCHA IV']
@@ -574,7 +679,6 @@ def generate_pdf(car_df, api, ddm, fr):
         else:
             route_dest = route_recv = None
 
-        # 5 páginas de cancha (multi-página si overflow)
         for ci, cancha in enumerate(CANCHA_ORDER):
             is_first_rep = (ci == 0)
             receives = (cancha == route_recv and not is_first_rep)
@@ -582,12 +686,10 @@ def generate_pdf(car_df, api, ddm, fr):
                               lema, fecha_str, date_str, pc, pall_values,
                               route_dest if is_first_rep else None, receives)
 
-        # Hojas SIN CANCHA (una por SKU)
         for r in [r for r in rows if r['cancha'] == 'SIN CANCHA']:
             draw_sin_cancha_page(c, r, numero, transport, chofer, lema, fecha_str, date_str, pc)
             stats['sin_cancha_skus'].append(f"{r['sku']} — {r['desc']}")
 
-        # Stats
         for r in rows:
             if r['row_st'] == 'RED':   stats['red'].append(r['sku'])
             if r['row_st'] == 'YELLOW':stats['yellow'].append(r['sku'])
@@ -614,7 +716,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; v3.3</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.4</b> (fix canchas I:M + debug)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
@@ -624,21 +726,58 @@ def main():
     if car_file and fr_file:
         with st.spinner('⚙️ Procesando…'):
             try:
-                car_df       = load_car(car_file)
-                api, ddm, fr = load_frescura(fr_file)
+                car_df              = load_car(car_file)
+                api, ddm, fr, diag  = load_frescura(fr_file)
+
+                # ── DEBUG PREVIO A GENERAR PDF ──────────────────────────────
+                with st.expander('🔍 Debug — Mapeo SKU → Almacén → Cancha (revisar ANTES de descargar)', expanded=True):
+                    st.markdown("**Headers detectados en hoja API:**")
+                    st.code(f"Columna SKU usada       : {diag['col_sku_used']}\n"
+                            f"Columna almacén-SKU     : {diag['col_alm_sku_used']}\n"
+                            f"Bloque I:M cols crudas  : {diag['alm_master_cols_raw']}\n"
+                            f"Mapeo I:M aplicado      : I=alm_num | J=alm_det | K=calibre | L=apil | M=cancha\n"
+                            f"SKUs en API mergeados   : {diag['sku_count_api']}\n"
+                            f"Almacenes en tabla I:M  : {diag['alm_master_count']}\n"
+                            f"SKUs que quedaron SIN CANCHA: {diag['sku_sin_cancha']}",
+                            language='')
+
+                    st.markdown("**Tabla maestra de almacenes (I:M, primeros 20):**")
+                    st.dataframe(pd.DataFrame(diag['alm_master_preview']), use_container_width=True, hide_index=True)
+
+                    st.markdown("**Conteo de SKUs por cancha en API:**")
+                    cnt = api['cancha'].value_counts().reset_index()
+                    cnt.columns = ['Cancha', 'SKUs']
+                    st.dataframe(cnt, use_container_width=True, hide_index=True)
+
                 pdf_bytes, stats = generate_pdf(car_df, api, ddm, fr)
 
                 st.success(f'✅ PDF generado — {stats["total_pages"]} páginas | {len(stats["repartos"])} repartos')
                 fname = f'Planilla_Carga_{datetime.today().strftime("%d%m%Y")}.pdf'
                 st.download_button('⬇️  Descargar PDF', pdf_bytes, fname, 'application/pdf', use_container_width=True)
 
+                # ── TRAZABILIDAD POST-PROCESO ───────────────────────────────
+                with st.expander('🧾 Trazabilidad de cancha por SKU (lo que va a cada página del PDF)', expanded=False):
+                    if stats['trace']:
+                        tdf = pd.DataFrame(stats['trace'])
+                        # Filtros rápidos
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            canchas_sel = st.multiselect('Filtrar cancha', sorted(tdf['Cancha'].unique()),
+                                                          default=list(sorted(tdf['Cancha'].unique())))
+                        with col_b:
+                            repartos_sel = st.multiselect('Filtrar reparto', sorted(tdf['Reparto'].unique()),
+                                                           default=list(sorted(tdf['Reparto'].unique())))
+                        tdf_f = tdf[tdf['Cancha'].isin(canchas_sel) & tdf['Reparto'].isin(repartos_sel)]
+                        st.dataframe(tdf_f, use_container_width=True, hide_index=True, height=400)
+                        st.caption(f'Total filas: {len(tdf_f)} de {len(tdf)}')
+
                 def fmt(lst):
                     u = list(dict.fromkeys(lst))
                     return (', '.join(str(x) for x in u[:10]) + (f' +{len(u)-10}' if len(u)>10 else '')) if u else 'ninguno'
 
-                with st.expander('📋 Validación pre-generación', expanded=True):
+                with st.expander('📋 Validación pre-generación', expanded=False):
                     rep_ids = ' | '.join(str(r['numero']) for r in stats['repartos'])
-                    st.code(f"""VALIDACIÓN PRE-GENERACIÓN — v3.3
+                    st.code(f"""VALIDACIÓN PRE-GENERACIÓN — v3.4
 ──────────────────────────────────────────────────────
 ✅ Repartos            : {len(stats['repartos'])}  [{rep_ids}]
 ✅ Páginas totales     : {stats['total_pages']}

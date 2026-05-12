@@ -581,8 +581,10 @@ def footer_reserve(has_route: bool) -> float:
 def content_avail(is_first_rep_page: bool, has_route: bool) -> float:
     return PAGE_H - 2*MARGIN - header_height(is_first_rep_page) - footer_reserve(has_route)
 
+ALM_GAP = 8   # espacio entre grupos de almacén (más legible)
+
 def alm_group_height(n_rows: int) -> float:
-    return GAP + H_ALM + n_rows*H_ROW + H_TOT
+    return ALM_GAP + H_ALM + n_rows*H_ROW + H_TOT
 
 def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
                        chofer, lema, fecha_str, date_str, pc,
@@ -642,7 +644,7 @@ def draw_cancha_pages(c, reparto_rows, cancha, is_first_rep, numero, transport,
                 'Helvetica-Oblique', 8, colors.HexColor('#888888'), 'center')
         else:
             for alm_id, alm_det, rows in pg_groups:
-                y += GAP
+                y += ALM_GAP
                 y += draw_alm_header(c, y, alm_id, alm_det)
                 for r in rows:
                     y += draw_product_row(c, y, r)
@@ -771,7 +773,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.6</b> (fix canchas I:M + debug)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.7</b> (fix canchas I:M + debug)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)

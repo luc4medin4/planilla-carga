@@ -156,13 +156,55 @@ def normalize_cancha(val):
 # ─── CARGA DE DATOS ─────────────────────────────────────────────────────────
 
 def load_car(file):
-    df = pd.read_excel(file, sheet_name=0)
-    df['Artículo'] = pd.to_numeric(df['Artículo'], errors='coerce')
-    df = df.dropna(subset=['Artículo'])
-    df['Artículo'] = df['Artículo'].astype(int)
-    df['Bultos']   = pd.to_numeric(df['Bultos'], errors='coerce').fillna(0)
-    df['Unids']    = pd.to_numeric(df['Unids'],  errors='coerce').fillna(0)
-    df = df[~df.apply(lambda r: is_envase(r['Artículo'], r['Descripción Artículo']), axis=1)]
+    # ── Leer hoja completa sin header para manejar filas por índice ──────────
+    raw = pd.read_excel(file, sheet_name=0, header=None)
+
+    # Fila 0 = header (Excel fila 1)
+    header = raw.iloc[0].tolist()
+
+    # ── FILAS AZULES: Excel filas 2-41 → índices 1-40 ────────────────────────
+    # Columna T = índice 19 (A=0 … T=19)
+    blue_raw = raw.iloc[1:41].copy()
+    blue_raw.columns = header
+
+    blue_raw["Artículo"]   = pd.to_numeric(blue_raw["Artículo"], errors="coerce")
+    blue_raw["Transporte"] = pd.to_numeric(blue_raw["Transporte"], errors="coerce")
+    blue_raw["_bultos_azul"] = pd.to_numeric(blue_raw.iloc[:, 19], errors="coerce").fillna(0)
+    blue_raw = blue_raw.dropna(subset=["Artículo", "Transporte"])
+    blue_raw = blue_raw[blue_raw["Artículo"] > 0]
+    blue_raw = blue_raw[blue_raw["_bultos_azul"] > 0]
+    blue_raw["Artículo"]   = blue_raw["Artículo"].astype(int)
+    blue_raw["Transporte"] = blue_raw["Transporte"].apply(lambda x: int(float(x)) if pd.notna(x) else x)
+    # Excluir envases de las filas azules
+    blue_raw = blue_raw[~blue_raw.apply(
+        lambda r: is_envase(int(r["Artículo"]), str(r.get("Descripción Artículo", ""))), axis=1
+    )]
+    # Agregar bultos azules por Transporte + SKU
+    blue_agg = (blue_raw.groupby(["Transporte", "Artículo"], as_index=False)
+                .agg(_bultos_azul=("_bultos_azul", "sum")))
+
+    # ── FILAS NORMALES: Excel fila 42 en adelante → índice 41+ ───────────────
+    normal_raw = raw.iloc[41:].copy()
+    normal_raw.columns = header
+
+    df = normal_raw.copy()
+    df["Artículo"]   = pd.to_numeric(df["Artículo"], errors="coerce")
+    df["Transporte"] = pd.to_numeric(df["Transporte"], errors="coerce")
+    df = df.dropna(subset=["Artículo", "Transporte"])
+    df = df[df["Artículo"] > 0]
+    df["Artículo"]   = df["Artículo"].astype(int)
+    df["Transporte"] = df["Transporte"].apply(lambda x: int(float(x)) if pd.notna(x) else x)
+    df["Bultos"]     = pd.to_numeric(df["Bultos"], errors="coerce").fillna(0)
+    df["Unids"]      = pd.to_numeric(df["Unids"],  errors="coerce").fillna(0)
+    df = df[~df.apply(lambda r: is_envase(r["Artículo"], r["Descripción Artículo"]), axis=1)]
+
+    # ── MERGE: sumar bultos azules sobre los normales ─────────────────────────
+    if not blue_agg.empty:
+        df = df.merge(blue_agg, on=["Transporte", "Artículo"], how="left")
+        df["_bultos_azul"] = df["_bultos_azul"].fillna(0)
+        df["Bultos"] = df["Bultos"] + df["_bultos_azul"]
+        df = df.drop(columns=["_bultos_azul"])
+
     return df
 
 def load_frescura(file):
@@ -375,9 +417,19 @@ def draw_title_bar(c, y, numero, fecha_str):
     txt(c, MARGIN+CW/2, y+17, label, 'Helvetica-Bold', 9.5, colors.white, 'center', CW-16)
     return H_TITLE
 
+def fmt_transport(t):
+    """Elimina el .0 final del número de transporte (128.0 → 128)."""
+    try:
+        v = float(t)
+        if v == int(v):
+            return str(int(v))
+    except (ValueError, TypeError):
+        pass
+    return str(t)
+
 def draw_transport_line(c, y, transport, chofer):
     rfill(c, MARGIN, y, CW, H_TRANS, colors.HexColor('#EEF2F8'))
-    txt(c, MARGIN+6,      y+12, f'Transporte: {transport} - {chofer}', 'Helvetica-Bold', 8)
+    txt(c, MARGIN+6,      y+12, f'Transporte: {fmt_transport(transport)} - {chofer}', 'Helvetica-Bold', 8)
     txt(c, MARGIN+CW-6,   y+12, 'Depósito: 001 - CASA CENTRAL',        'Helvetica-Bold', 8, align='right')
     return H_TRANS
 

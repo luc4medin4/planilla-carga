@@ -378,6 +378,8 @@ def build_alm_groups(c_rows):
         groups[key].append(r)
     for key in order:
         groups[key].sort(key=lambda x: -x['blts_raw'])
+    # Ordenar almacenes de menor a mayor por número de almacén
+    order.sort(key=lambda k: (k[0] is None, k[0] if k[0] is not None else 0))
     return [(k[0], k[1], groups[k]) for k in order]
 
 def compute_pall_value(rows, cancha):
@@ -502,11 +504,11 @@ def draw_product_row(c, y, r):
     for (s, align), w in zip(cells, COL_W):
         c.rect(x, ry(y+H_ROW), w, H_ROW, fill=0, stroke=1)
         if align == 'center':
-            txt(c, x+w/2, y+9.5, s, font, 7, align='center', mw=w-3)
+            txt(c, x+w/2, y+9.5, s, font, 8, align='center', mw=w-3)
         else:
-            txt(c, x+3,   y+9.5, s, font, 7, mw=w-5)
+            txt(c, x+3,   y+9.5, s, font, 8, mw=w-5)
         if r['has_pal'] and align=='center' and s==bp_s:
-            tw = c.stringWidth(s, font, 7)
+            tw = c.stringWidth(s, font, 8)
             cx = x+w/2
             c.setStrokeColor(colors.black); c.setLineWidth(0.6)
             c.line(cx-tw/2, ry(y+H_ROW)+1, cx+tw/2, ry(y+H_ROW)+1)
@@ -768,7 +770,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.4</b> (fix canchas I:M + debug)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.5</b> (fix canchas I:M + debug)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)

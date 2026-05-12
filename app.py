@@ -416,7 +416,7 @@ def draw_watermark(c):
 def draw_title_bar(c, y, numero, fecha_str):
     rfill(c, MARGIN, y, CW, H_TITLE, DARK_BLUE)
     label = f'PLANILLA DE CARGA  |  Reparto Nro: {numero}  |  Fecha: {fecha_str}'
-    txt(c, MARGIN+CW/2, y+17, label, 'Helvetica-Bold', 9.5, colors.white, 'center', CW-16)
+    txt(c, MARGIN+CW/2, y+17, label, 'Helvetica-Bold', 10.5, colors.white, 'center', CW-16)
     return H_TITLE
 
 def fmt_transport(t):
@@ -431,21 +431,21 @@ def fmt_transport(t):
 
 def draw_transport_line(c, y, transport, chofer):
     rfill(c, MARGIN, y, CW, H_TRANS, colors.HexColor('#EEF2F8'))
-    txt(c, MARGIN+6,      y+12, f'Transporte: {fmt_transport(transport)} - {chofer}', 'Helvetica-Bold', 8)
-    txt(c, MARGIN+CW-6,   y+12, 'Depósito: 001 - CASA CENTRAL',        'Helvetica-Bold', 8, align='right')
+    txt(c, MARGIN+6,      y+12, f'Transporte: {fmt_transport(transport)} - {chofer}', 'Helvetica-Bold', 9)
+    txt(c, MARGIN+CW-6,   y+12, 'Depósito: 001 - CASA CENTRAL',        'Helvetica-Bold', 9, align='right')
     return H_TRANS
 
 def draw_partida_regreso(c, y):
-    txt(c, MARGIN+6,     y+11, 'F. y H. Est. de Partida: ________ Hs.', 'Helvetica', 8)
-    txt(c, MARGIN+CW-6,  y+11, 'F. y H. Est. de Regreso: ________ Hs.','Helvetica', 8, align='right')
+    txt(c, MARGIN+6,     y+11, 'F. y H. Est. de Partida: ________ Hs.', 'Helvetica', 9)
+    txt(c, MARGIN+CW-6,  y+11, 'F. y H. Est. de Regreso: ________ Hs.','Helvetica', 9, align='right')
     return H_PARTIDA
 
 def draw_control_carga(c, y):
     hdr_h = 15; box_h = H_CTRL - hdr_h; half = CW/2
     rfill(c, MARGIN,        y, half, hdr_h, HDR_BG, BORDER)
     rfill(c, MARGIN+half,   y, half, hdr_h, HDR_BG, BORDER)
-    txt(c, MARGIN+half/2,         y+10, 'CONTROL DE CARGA',    'Helvetica-Bold', 8, align='center')
-    txt(c, MARGIN+half+half/2,    y+10, 'CONTROL DE DESCARGA', 'Helvetica-Bold', 8, align='center')
+    txt(c, MARGIN+half/2,         y+10, 'CONTROL DE CARGA',    'Helvetica-Bold', 9, align='center')
+    txt(c, MARGIN+half+half/2,    y+10, 'CONTROL DE DESCARGA', 'Helvetica-Bold', 9, align='center')
     c.setStrokeColor(BORDER); c.setLineWidth(0.4)
     c.rect(MARGIN, ry(y+hdr_h+box_h), CW, box_h, fill=0, stroke=1)
     c.line(MARGIN+half, ry(y+hdr_h), MARGIN+half, ry(y+hdr_h+box_h))
@@ -453,17 +453,17 @@ def draw_control_carga(c, y):
 
 def draw_lema(c, y, lema):
     rfill(c, MARGIN, y, CW, H_LEMA, DARK_BLUE)
-    txt(c, MARGIN+CW/2, y+12, f'"{lema}"', 'Helvetica-Oblique', 8, colors.white, 'center', CW-16)
+    txt(c, MARGIN+CW/2, y+12, f'"{lema}"', 'Helvetica-Oblique', 9, colors.white, 'center', CW-16)
     return H_LEMA
 
 def draw_cancha_header(c, y, label):
     rfill(c, MARGIN, y, CW, H_CANCHA, MED_BLUE)
-    txt(c, MARGIN+10, y+13, f'◀  {label}', 'Helvetica-Bold', 10, colors.white)
+    txt(c, MARGIN+10, y+13, f'◀  {label}', 'Helvetica-Bold', 11, colors.white)
     return H_CANCHA
 
 def draw_sin_cancha_header(c, y):
     rfill(c, MARGIN, y, CW, H_CANCHA, RED_ALERT)
-    txt(c, MARGIN+CW/2, y+13, '⚠  SIN CANCHA ASIGNADA — REVISAR', 'Helvetica-Bold', 10, colors.white, 'center')
+    txt(c, MARGIN+CW/2, y+13, '⚠  SIN CANCHA ASIGNADA — REVISAR', 'Helvetica-Bold', 11, colors.white, 'center')
     return H_CANCHA
 
 def draw_table_header(c, y):
@@ -473,14 +473,14 @@ def draw_table_header(c, y):
     for lbl, w in zip(labels, COL_W):
         c.setStrokeColor(BORDER); c.setLineWidth(0.4)
         c.rect(x, ry(y+H_THDR), w, H_THDR, fill=0, stroke=1)
-        txt(c, x+w/2, y+9.5, lbl, 'Helvetica-Bold', 7, align='center')
+        txt(c, x+w/2, y+9.5, lbl, 'Helvetica-Bold', 8, align='center')
         x += w
     return H_THDR
 
 def draw_alm_header(c, y, alm_id, alm_det):
     label = f'Almacén {alm_id} — {alm_det}' if alm_id is not None else 'Almacén: SIN DATOS'
     rfill(c, MARGIN, y, CW, H_ALM, ALM_BG, BORDER)
-    txt(c, MARGIN+6, y+11, label, 'Helvetica-Bold', 8)
+    txt(c, MARGIN+6, y+11, label, 'Helvetica-Bold', 9)
     return H_ALM
 
 def draw_product_row(c, y, r):
@@ -501,14 +501,15 @@ def draw_product_row(c, y, r):
 
     cells = [(sku_s,'center'),(r['desc'],'left'),(venc_s,'center'),(bp_s,'center'),(un_s,'center')]
     x = MARGIN
-    for (s, align), w in zip(cells, COL_W):
+    for i, ((s, align), w) in enumerate(zip(cells, COL_W)):
         c.rect(x, ry(y+H_ROW), w, H_ROW, fill=0, stroke=1)
         if align == 'center':
-            txt(c, x+w/2, y+9.5, s, font, 8, align='center', mw=w-3)
+            txt(c, x+w/2, y+9.5, s, font, 9, align='center', mw=w-3)
         else:
-            txt(c, x+3,   y+9.5, s, font, 8, mw=w-5)
-        if r['has_pal'] and align=='center' and s==bp_s:
-            tw = c.stringWidth(s, font, 8)
+            txt(c, x+3,   y+9.5, s, font, 9, mw=w-5)
+        # Subrayado SOLO en columna Bultos (índice 3)
+        if r['has_pal'] and i == 3:
+            tw = c.stringWidth(s, font, 9)
             cx = x+w/2
             c.setStrokeColor(colors.black); c.setLineWidth(0.6)
             c.line(cx-tw/2, ry(y+H_ROW)+1, cx+tw/2, ry(y+H_ROW)+1)
@@ -523,39 +524,39 @@ def draw_total_row(c, y, tot_b, tot_u):
     c.rect(MARGIN,    ry(y+H_TOT), mw,      H_TOT, fill=0, stroke=1)
     c.rect(MARGIN+mw, ry(y+H_TOT), COL_W[3],H_TOT, fill=0, stroke=1)
     c.rect(MARGIN+mw+COL_W[3], ry(y+H_TOT), COL_W[4], H_TOT, fill=0, stroke=1)
-    txt(c, MARGIN+mw/2, y+9.5, 'T O T A L  A L M A C É N', 'Helvetica-Bold', 7.5, align='center')
+    txt(c, MARGIN+mw/2, y+9.5, 'T O T A L  A L M A C É N', 'Helvetica-Bold', 8.5, align='center')
     for val, xoff in [(tot_b, mw), (tot_u, mw+COL_W[3])]:
         s = str(int(val)) if val == int(val) else f'{val:.0f}'
-        txt(c, MARGIN+xoff+COL_W[3 if xoff==mw else 4]/2, y+9.5, s, 'Helvetica-Bold', 7.5, align='center')
+        txt(c, MARGIN+xoff+COL_W[3 if xoff==mw else 4]/2, y+9.5, s, 'Helvetica-Bold', 8.5, align='center')
     return H_TOT
 
 def draw_espacio_asignado(c, y, cancha, pv):
     rfill(c, MARGIN, y, CW, H_ESPACIO, BG_GRAY, BORDER)
-    txt(c, MARGIN+CW/2, y+10, f'ESPACIO ASIGNADO — {cancha}', 'Helvetica-Bold', 8, align='center')
+    txt(c, MARGIN+CW/2, y+10, f'ESPACIO ASIGNADO — {cancha}', 'Helvetica-Bold', 9, align='center')
     col_w = CW/3
     hdrs  = ['Valor mínimo','Valor entero','Lectura']
     bx = MARGIN; by = y+14; rh = 13
     c.setStrokeColor(BORDER); c.setLineWidth(0.4)
     for h in hdrs:
         rfill(c, bx, by, col_w, rh, HDR_BG, BORDER)
-        txt(c, bx+col_w/2, by+9, h, 'Helvetica-Bold', 7, align='center')
+        txt(c, bx+col_w/2, by+9, h, 'Helvetica-Bold', 8, align='center')
         bx += col_w
     vm, ve, lec = pallet_reading(pv)
     bx = MARGIN; by2 = by+rh
     for v in [vm, ve, lec]:
         rfill(c, bx, by2, col_w, rh, colors.white, BORDER)
-        txt(c, bx+col_w/2, by2+9, v, 'Helvetica', 7.5, align='center', mw=col_w-4)
+        txt(c, bx+col_w/2, by2+9, v, 'Helvetica', 8.5, align='center', mw=col_w-4)
         bx += col_w
     return H_ESPACIO
 
 def draw_route_to(c, y, dest):
     rfill(c, MARGIN, y, CW, H_ROUTE, YELLOW_RTE, BORDER)
-    txt(c, MARGIN+CW/2, y+11, f'▶  DIRIGIR PALETA A: {dest}', 'Helvetica-Bold', 8.5, align='center')
+    txt(c, MARGIN+CW/2, y+11, f'▶  DIRIGIR PALETA A: {dest}', 'Helvetica-Bold', 9.5, align='center')
     return H_ROUTE
 
 def draw_route_recv(c, y):
     rfill(c, MARGIN, y, CW, H_ROUTE, LIGHT_GRAY, BORDER)
-    txt(c, MARGIN+CW/2, y+11, '◀  RECIBE PALETA DESDE: CANCHA I', 'Helvetica-Bold', 8.5, align='center')
+    txt(c, MARGIN+CW/2, y+11, '◀  RECIBE PALETA DESDE: CANCHA I', 'Helvetica-Bold', 9.5, align='center')
     return H_ROUTE
 
 def draw_footer(c, date_str, page_num):
@@ -563,9 +564,9 @@ def draw_footer(c, date_str, page_num):
     c.setStrokeColor(colors.HexColor('#CCCCCC')); c.setLineWidth(0.5)
     c.line(MARGIN, ry(yb-4), MARGIN+CW, ry(yb-4))
     txt(c, MARGIN+CW/2, yb+6, 'Almacen Digital 3.0  |  Beccacece Hnos SA  |  Distribuidor Oficial CMQ — Desde 1963',
-        'Helvetica', 7, FOOT_GRAY, 'center')
-    txt(c, MARGIN,    yb+16, date_str,           'Helvetica', 7, FOOT_GRAY)
-    txt(c, MARGIN+CW, yb+16, f'Página: {page_num}','Helvetica', 7, FOOT_GRAY, 'right')
+        'Helvetica', 8, FOOT_GRAY, 'center')
+    txt(c, MARGIN,    yb+16, date_str,           'Helvetica', 8, FOOT_GRAY)
+    txt(c, MARGIN+CW, yb+16, f'Página: {page_num}','Helvetica', 8, FOOT_GRAY, 'right')
 
 def header_height(is_first_rep_page: bool) -> float:
     h = H_TITLE + GAP + H_TRANS + GAP
@@ -770,7 +771,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.5</b> (fix canchas I:M + debug)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.6</b> (fix canchas I:M + debug)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)

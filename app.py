@@ -1,6 +1,14 @@
 """
 Planilla de Carga — Beccacece Hnos SA
-Generador automático v3.8 | Streamlit + ReportLab
+Generador automático v3.9 | Streamlit + ReportLab
+
+Cambios v3.8 → v3.9 (NUEVA FUNCIONALIDAD — Resumen de Carga por Camión):
+  - Nuevo botón "📋 Generar resumen por camión" (separado del flujo principal).
+  - Lee hoja AGR del CAR y consolida bultos por SKU por camión.
+  - PDF A4 vertical, multi-página, diseño minimalista.
+  - Columnas: Código | Descripción | Bultos | Check (recuadro vacío para tildar).
+  - Pie de página "Página X de Y".
+  - El flujo principal v3.8 NO se modifica (intacto).
 
 Cambios v3.7 → v3.8 (FIX CRÍTICO BLOQUE AZUL — filas huérfanas):
   - Detectado: filas del bloque azul (filas 2-41) con SKUs que no existen como
@@ -944,6 +952,259 @@ def generate_pdf(car_df, api, ddm, fr):
     stats['total_pages'] = pc['n']
     return buf.read(), stats
 
+# ─── RESUMEN DE CARGA POR CAMIÓN (v3.9, hoja AGR) ───────────────────────────
+
+def load_agr(file):
+    """Lee la hoja AGR del CAR y devuelve DF consolidado por camión + SKU.
+
+    Columnas resultantes: chofer | cod_producto | descripcion | bultos
+    Una fila por (camión, SKU) con bultos sumados.
+    Ignora Cliente / Razón social / Importes (no son relevantes para este doc).
+    """
+    file.seek(0)
+    raw = pd.read_excel(file, sheet_name='AGR', header=None)
+
+    # Buscar la fila de header (contiene 'Cliente' o 'Chofer')
+    header_row = None
+    for i in range(min(10, len(raw))):
+        row_str = ' '.join(str(v) for v in raw.iloc[i].values if pd.notna(v))
+        if 'Chofer' in row_str and 'Cantidad' in row_str:
+            header_row = i
+            break
+    if header_row is None:
+        raise ValueError("No se encontró el header de la hoja AGR (esperaba 'Chofer' y 'Cantidad').")
+
+    df = pd.read_excel(file, sheet_name='AGR', header=header_row)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_cod   = find_col(df, 'Cod Producto', 'CodProducto', 'Codigo Producto', 'Codigo', 'Código')
+    col_desc  = find_col(df, 'DESCRIPCION', 'Descripcion', 'Descripción')
+    col_cant  = find_col(df, 'Cantidad', 'Bultos')
+    col_chof  = find_col(df, 'Chofer', 'Camion', 'Camión')
+
+    if not all([col_cod, col_desc, col_cant, col_chof]):
+        raise ValueError(
+            f"Faltan columnas en hoja AGR. Encontradas: {list(df.columns)}. "
+            f"Necesito: Cod Producto, Descripcion, Cantidad, Chofer."
+        )
+
+    df = df[[col_cod, col_desc, col_cant, col_chof]].copy()
+    df.columns = ['cod_producto', 'descripcion', 'bultos', 'chofer']
+    df = df.dropna(subset=['chofer', 'cod_producto', 'bultos'])
+
+    df['chofer']       = df['chofer'].apply(to_int_sku)
+    df['cod_producto'] = df['cod_producto'].apply(to_int_sku)
+    df['bultos']       = pd.to_numeric(df['bultos'], errors='coerce').fillna(0).astype(int)
+    df['descripcion']  = df['descripcion'].astype(str).str.strip()
+    df = df[df['bultos'] > 0]
+
+    # Consolidación: total por SKU por camión
+    out = (df.groupby(['chofer', 'cod_producto', 'descripcion'], as_index=False)['bultos']
+             .sum()
+             .sort_values(['chofer', 'cod_producto']))
+    return out
+
+
+def _draw_resumen_header(c, fecha_str):
+    """Cabecera del documento (título + subtítulo + línea separadora)."""
+    margin = 15 * mm
+    y_top = PAGE_H - margin
+
+    c.setFillColor(colors.HexColor('#1a1a1a'))
+    c.setFont('Helvetica-Bold', 16)
+    c.drawString(margin, y_top - 14, 'Resumen de Carga por Camión')
+
+    c.setFillColor(colors.HexColor('#666666'))
+    c.setFont('Helvetica', 9)
+    subt = f"Beccacece Hnos. S.A.   ·   La Reja, Moreno   ·   Fecha: {fecha_str}"
+    c.drawString(margin, y_top - 28, subt)
+
+    # Línea separadora
+    c.setStrokeColor(colors.HexColor('#1a1a1a'))
+    c.setLineWidth(0.8)
+    c.line(margin, y_top - 36, PAGE_W - margin, y_top - 36)
+
+    return y_top - 44  # y donde puede empezar el contenido (en coord top-down)
+
+
+def _truck_block_height(n_rows):
+    """Altura total de un bloque de camión (header + filas + spacer)."""
+    return 7*mm + 6*mm + n_rows * 7*mm + 6*mm  # header + thead + filas + spacer
+
+
+def _draw_truck_block(c, y_top, cam, rows):
+    """Dibuja un bloque (header de camión + tabla) usando coords top-down.
+    Devuelve el nuevo y_top (más abajo) después del bloque.
+    """
+    margin = 15 * mm
+    total_w = PAGE_W - 2 * margin  # 180mm
+
+    # Anchos de columna: Código 22 | Descripción 122 | Bultos 26 | Check 10 (mm)
+    w_cod, w_desc, w_blt, w_chk = 22*mm, 122*mm, 26*mm, 10*mm
+
+    # ── 1) Header del camión (barra negra) ──────────────────────────────────
+    h_hdr = 7 * mm
+    y_hdr = y_top - h_hdr
+    c.setFillColor(colors.HexColor('#1a1a1a'))
+    c.rect(margin, y_hdr, total_w, h_hdr, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(margin + 6, y_hdr + 2.3*mm, f'Camión {cam}')
+
+    # ── 2) Header de columnas (banda gris clara) ────────────────────────────
+    h_thd = 6 * mm
+    y_thd = y_hdr - h_thd
+    c.setFillColor(colors.HexColor('#f0f0f0'))
+    c.rect(margin, y_thd, total_w, h_thd, fill=1, stroke=0)
+    c.setStrokeColor(colors.HexColor('#cccccc'))
+    c.setLineWidth(0.5)
+    c.line(margin, y_thd, margin + total_w, y_thd)  # línea inferior
+
+    c.setFillColor(colors.HexColor('#333333'))
+    c.setFont('Helvetica-Bold', 8.5)
+    # Centrado en la celda
+    c.drawCentredString(margin + w_cod/2,                                y_thd + 1.7*mm, 'Código')
+    c.drawString       (margin + w_cod + 6,                              y_thd + 1.7*mm, 'Descripción')
+    c.drawCentredString(margin + w_cod + w_desc + w_blt/2,               y_thd + 1.7*mm, 'Bultos')
+    c.drawCentredString(margin + w_cod + w_desc + w_blt + w_chk/2,       y_thd + 1.7*mm, 'Check')
+
+    # ── 3) Filas ─────────────────────────────────────────────────────────────
+    h_row = 7 * mm
+    y_cur = y_thd
+    c.setStrokeColor(colors.HexColor('#cccccc'))
+
+    for i, r in enumerate(rows):
+        y_cur -= h_row
+
+        # Texto
+        c.setFillColor(colors.HexColor('#1a1a1a'))
+        c.setFont('Helvetica', 9)
+        c.drawCentredString(margin + w_cod/2,                          y_cur + 2.2*mm, str(r['cod_producto']))
+        c.drawString       (margin + w_cod + 6,                        y_cur + 2.2*mm, str(r['descripcion']))
+        c.setFont('Helvetica-Bold', 9)
+        c.drawCentredString(margin + w_cod + w_desc + w_blt/2,         y_cur + 2.2*mm, str(int(r['bultos'])))
+
+        # Línea separadora entre filas (excepto la última, que la cierra el BOX)
+        if i < len(rows) - 1:
+            c.setStrokeColor(colors.HexColor('#e8e8e8'))
+            c.setLineWidth(0.25)
+            c.line(margin, y_cur, margin + total_w, y_cur)
+
+        # Recuadro de check (casilla destacada con borde más marcado)
+        chk_x = margin + w_cod + w_desc + w_blt
+        # padding interno para que el cuadrado no toque los bordes de la fila
+        pad_x, pad_y = 2.5*mm, 1.3*mm
+        c.setStrokeColor(colors.HexColor('#666666'))
+        c.setLineWidth(0.8)
+        c.rect(chk_x + pad_x, y_cur + pad_y,
+               w_chk - 2*pad_x, h_row - 2*pad_y,
+               fill=0, stroke=1)
+
+    # ── 4) Box exterior de toda la tabla ─────────────────────────────────────
+    tabla_h = h_thd + len(rows) * h_row
+    c.setStrokeColor(colors.HexColor('#cccccc'))
+    c.setLineWidth(0.5)
+    c.rect(margin, y_thd - len(rows) * h_row, total_w, tabla_h, fill=0, stroke=1)
+
+    # Línea vertical antes de columna check
+    chk_x = margin + w_cod + w_desc + w_blt
+    c.line(chk_x, y_thd - len(rows)*h_row, chk_x, y_thd)
+
+    # Devolver y_top siguiente (con un spacer de 6mm)
+    return y_cur - 6 * mm
+
+
+def _draw_resumen_footer(c, page_num, total_pages):
+    """Pie de página: 'Página X de Y' centrado."""
+    c.setFillColor(colors.HexColor('#666666'))
+    c.setFont('Helvetica', 8)
+    c.drawCentredString(PAGE_W / 2, 10 * mm, f'Página {page_num} de {total_pages}')
+
+
+def build_resumen_carga_pdf(car_file):
+    """Genera el PDF 'Resumen de Carga por Camión' a partir de la hoja AGR.
+
+    Lógica:
+      1) Lee hoja AGR y consolida bultos por (camión, SKU).
+      2) Ordena camiones ascendentemente.
+      3) Imprime en bloques compactos: varios camiones por página si entran.
+      4) Ningún bloque se parte entre páginas.
+      5) Pie de página 'Página X de Y'.
+    """
+    resumen = load_agr(car_file)
+    if resumen.empty:
+        raise ValueError("La hoja AGR no contiene datos válidos para generar el resumen.")
+
+    margin = 15 * mm
+    fecha_str = datetime.today().strftime('%d/%m/%Y')
+
+    # ── PRIMERA PASADA: paginar (sin dibujar) para conocer total_pages ──────
+    camiones = sorted(resumen['chofer'].unique())
+    bloques = []  # lista de (cam, rows_list, alto)
+    for cam in camiones:
+        sub = resumen[resumen['chofer'] == cam].to_dict('records')
+        h = _truck_block_height(len(sub))
+        bloques.append((cam, sub, h))
+
+    # Reserva para cabecera (solo en página 1) y pie (en todas)
+    H_HEADER_PAGE1 = 44  # 'Resumen de Carga por Camión' + subt + línea + spacer
+    H_FOOTER      = 18 * mm  # margen inferior efectivo donde reservamos espacio
+
+    # Espacio disponible para contenido (top → bottom)
+    def avail(is_first_page):
+        top    = PAGE_H - margin
+        bottom = H_FOOTER  # piso del contenido
+        if is_first_page:
+            top -= H_HEADER_PAGE1
+        return top - bottom
+
+    # Asignar bloques a páginas
+    pages = []   # lista de lista de (cam, rows)
+    current = []
+    space_left = avail(True)
+    is_first   = True
+    for cam, rows, h in bloques:
+        if h <= space_left:
+            current.append((cam, rows))
+            space_left -= h
+        else:
+            # Cerrar página actual y abrir nueva
+            pages.append(current)
+            is_first = False
+            current = [(cam, rows)]
+            space_left = avail(False) - h
+    if current:
+        pages.append(current)
+
+    total_pages = len(pages)
+
+    # ── SEGUNDA PASADA: dibujar ─────────────────────────────────────────────
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=A4)
+    c.setTitle('Resumen de Carga por Camión')
+
+    for page_idx, page_content in enumerate(pages):
+        is_first_page = (page_idx == 0)
+        if is_first_page:
+            y_top = _draw_resumen_header(c, fecha_str)
+        else:
+            y_top = PAGE_H - margin
+
+        for cam, rows in page_content:
+            y_top = _draw_truck_block(c, y_top, cam, rows)
+
+        _draw_resumen_footer(c, page_idx + 1, total_pages)
+        c.showPage()
+
+    c.save()
+    pdf_bytes = buf.getvalue()
+    return pdf_bytes, {
+        'total_pages': total_pages,
+        'camiones': len(camiones),
+        'filas_sku': len(resumen),
+    }
+
+
 # ─── STREAMLIT UI ────────────────────────────────────────────────────────────
 
 def main():
@@ -959,7 +1220,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.8</b> (fix bloque azul huérfanos + auditoría)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.9</b> (+ resumen de carga por camión)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
@@ -1029,6 +1290,29 @@ def main():
                 st.success(f'✅ PDF generado — {stats["total_pages"]} páginas | {len(stats["repartos"])} repartos')
                 fname = f'Planilla_Carga_{datetime.today().strftime("%d%m%Y")}.pdf'
                 st.download_button('⬇️  Descargar PDF', pdf_bytes, fname, 'application/pdf', use_container_width=True)
+
+                # ── NUEVO v3.9: RESUMEN DE CARGA POR CAMIÓN (hoja AGR) ──────
+                st.markdown("---")
+                st.markdown("### 📋 Resumen de Carga por Camión")
+                st.caption("Documento adicional para impresión: total de bultos por SKU por camión, con casilla de check para tildar.")
+                if st.button('📋 Generar resumen por camión', use_container_width=True, key='btn_resumen'):
+                    try:
+                        with st.spinner('⚙️ Generando resumen…'):
+                            resumen_bytes, resumen_stats = build_resumen_carga_pdf(car_file)
+                        st.success(
+                            f'✅ Resumen generado — {resumen_stats["total_pages"]} página(s) | '
+                            f'{resumen_stats["camiones"]} camiones | {resumen_stats["filas_sku"]} líneas SKU'
+                        )
+                        fname_r = f'Resumen_Carga_{datetime.today().strftime("%d%m%Y")}.pdf'
+                        st.download_button(
+                            '⬇️  Descargar Resumen por Camión',
+                            resumen_bytes, fname_r, 'application/pdf',
+                            use_container_width=True, key='dl_resumen'
+                        )
+                    except Exception as e_r:
+                        st.error(f'❌ Error generando resumen: {e_r}')
+                        st.exception(e_r)
+                st.markdown("---")
 
                 # ── TRAZABILIDAD POST-PROCESO ───────────────────────────────
                 with st.expander('🧾 Trazabilidad de cancha por SKU (lo que va a cada página del PDF)', expanded=False):

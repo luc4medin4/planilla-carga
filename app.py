@@ -1,6 +1,13 @@
 """
 Planilla de Carga — Beccacece Hnos SA
-Generador automático v3.9 | Streamlit + ReportLab
+Generador automático v3.9.1 | Streamlit + ReportLab
+
+Cambios v3.9 → v3.9.1 (FIX tema claro/oscuro):
+  - Removido CSS que forzaba fondo claro (.stApp background:#f8f9fb).
+  - Ahora la app se adapta automáticamente al tema del usuario (claro u oscuro).
+  - El banner azul corporativo queda fijo (identidad visual) con gradiente sutil.
+  - Separador <hr> con color translucido (rgba) que funciona en ambos temas.
+  - Sin cambios funcionales: misma lógica de v3.9.
 
 Cambios v3.8 → v3.9 (NUEVA FUNCIONALIDAD — Resumen de Carga por Camión):
   - Nuevo botón "📋 Generar resumen por camión" (separado del flujo principal).
@@ -1209,18 +1216,40 @@ def build_resumen_carga_pdf(car_file):
 
 def main():
     st.set_page_config(page_title='Planilla de Carga — Beccacece Hnos SA', page_icon='📦', layout='centered')
+    # CSS adaptativo: NO forzamos fondo. Streamlit aplica claro/oscuro segun el tema
+    # del usuario. El banner azul corporativo queda fijo (es identidad visual).
     st.markdown("""
     <style>
-    .stApp {background:#f8f9fb}
-    .tbox  {background:#1a3a6b;color:white;padding:18px 24px;border-radius:8px;margin-bottom:20px}
-    .tbox h2{margin:0;font-size:22px}
-    .tbox p {margin:4px 0 0;font-size:13px;opacity:.85}
+    /* Banner corporativo: fondo azul fijo en ambos modos, texto siempre blanco */
+    .tbox  {
+        background: linear-gradient(135deg, #1a3a6b 0%, #2e5fa3 100%);
+        color: #ffffff;
+        padding: 18px 24px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 8px rgba(26, 58, 107, 0.15);
+    }
+    .tbox h2 { margin: 0; font-size: 22px; color: #ffffff; }
+    .tbox p  { margin: 4px 0 0; font-size: 13px; opacity: .85; color: #ffffff; }
+
+    /* Separador horizontal: usa el color de borde del tema activo */
+    hr {
+        border: none;
+        border-top: 1px solid rgba(128, 128, 128, 0.25);
+        margin: 16px 0;
+    }
+
+    /* Asegurar que el subtitulo del resumen (caption) sea legible en ambos temas */
+    .resumen-section h3 {
+        margin-top: 0;
+        margin-bottom: 4px;
+    }
     </style>""", unsafe_allow_html=True)
 
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.9</b> (+ resumen de carga por camión)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.9.1</b> (+ resumen de carga por camión · fix tema claro/oscuro)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)

@@ -1,19 +1,29 @@
 """
 Planilla de Carga — Beccacece Hnos SA
-Generador automático v3.4 | Streamlit + ReportLab
+Generador automático v3.8 | Streamlit + ReportLab
 
-Cambios v3.3 → v3.4 (FIX CRÍTICO DE CANCHAS):
-  - Hoja API: la cancha NO se lee más por nombre 'CANCHA.1' desde columnas A-H.
-    Ahora se construye así:
-      1) Cruce SKU → almacén usando columna A ('Artículo') y la columna numérica
-         de almacén (típicamente 'almacén').
-      2) Tabla maestra de ALMACENES leída del bloque I:M (header en fila 1):
-         I=Nº Almacén | J=Detalle | K=Calibre | L=Apilabilidad | M=Cancha
-      3) Cada SKU hereda la cancha del almacén al que pertenece.
-  - SKU normalizado a entero antes de comparar (fix '12345' vs '12345.0' vs ' 12345 ').
-  - drop_duplicates determinista: prevalece la última fila con datos válidos.
-  - Debug expander con tabla SKU → Almacén → Cancha y headers reales detectados.
-  - Lectura de headers en runtime (tolerante a tildes y variantes).
+Cambios v3.7 → v3.8 (FIX CRÍTICO BLOQUE AZUL — filas huérfanas):
+  - Detectado: filas del bloque azul (filas 2-41) con SKUs que no existen como
+    fila normal en el mismo transporte se perdían silenciosamente en el merge
+    left (causaba que p.ej. 40 bultos de BUD lata en T115 no aparezcan en PDF).
+  - FIX: ahora se identifican como "huérfanas" y se agregan al df como filas
+    nuevas. La lógica posterior de paletas enteras vs picking en
+    process_reparto() decide qué imprimir.
+  - Cuando el SKU huérfano NO está en DDM (sin BXP), se carga el total de
+    bultos azules como picking y se marca con flag 'orphan_no_ddm' para
+    imprimir aviso "Producto no estaba en DDM, revisar" en el PDF.
+  - Invariante de validación: la suma de bultos azules consumidos
+    (merge + huérfanos) debe igualar el total del bloque azul. Si no, se
+    levanta error y se frena la generación.
+  - Debug expander v3.8: nueva tabla "🔎 Filas azules — auditoría completa"
+    con todas las filas del bloque azul y su destino (sumado / huérfano /
+    huérfano sin DDM), siempre visible.
+
+Cambios v3.3 → v3.4 (FIX CANCHAS):
+  - Hoja API: cancha se construye por cruce SKU → almacén → cancha usando
+    bloque I:M (I=Nº Almacén | J=Detalle | K=Calibre | L=Apil | M=Cancha).
+  - SKU normalizado a entero antes de comparar.
+  - drop_duplicates determinista: prevalece última fila con datos válidos.
 """
 import io, math, hashlib, unicodedata
 from datetime import datetime
@@ -155,7 +165,15 @@ def normalize_cancha(val):
 
 # ─── CARGA DE DATOS ─────────────────────────────────────────────────────────
 
-def load_car(file):
+def load_car(file, ddm=None):
+    """
+    v3.8 — Si se pasa ddm, se usa para decidir si los huérfanos del bloque azul
+    son paletas enteras (no se agregan) o tienen fracción / no tienen BXP
+    (se agregan al df). Si ddm es None, no se procesan huérfanos (compat retro).
+
+    Retorna: (df, blue_audit) donde blue_audit es una lista de dicts con la
+    trazabilidad de cada fila del bloque azul y su destino.
+    """
     # ── Leer hoja completa sin header para manejar filas por índice ──────────
     raw = pd.read_excel(file, sheet_name=0, header=None)
 
@@ -179,9 +197,16 @@ def load_car(file):
     blue_raw = blue_raw[~blue_raw.apply(
         lambda r: is_envase(int(r["Artículo"]), str(r.get("Descripción Artículo", ""))), axis=1
     )]
+
+    # Guardar descripción del primer registro azul por SKU (para huérfanos)
+    blue_desc_map = (blue_raw.dropna(subset=["Descripción Artículo"])
+                     .drop_duplicates(subset=["Artículo"], keep="first")
+                     .set_index("Artículo")["Descripción Artículo"].to_dict())
+
     # Agregar bultos azules por Transporte + SKU
     blue_agg = (blue_raw.groupby(["Transporte", "Artículo"], as_index=False)
                 .agg(_bultos_azul=("_bultos_azul", "sum")))
+    blue_total_in = float(blue_agg["_bultos_azul"].sum()) if len(blue_agg) else 0.0
 
     # ── FILAS NORMALES: Excel fila 42 en adelante → índice 41+ ───────────────
     normal_raw = raw.iloc[41:].copy()
@@ -198,14 +223,154 @@ def load_car(file):
     df["Unids"]      = pd.to_numeric(df["Unids"],  errors="coerce").fillna(0)
     df = df[~df.apply(lambda r: is_envase(r["Artículo"], r["Descripción Artículo"]), axis=1)]
 
-    # ── MERGE: sumar bultos azules sobre los normales ─────────────────────────
-    if not blue_agg.empty:
-        df = df.merge(blue_agg, on=["Transporte", "Artículo"], how="left")
-        df["_bultos_azul"] = df["_bultos_azul"].fillna(0)
-        df["Bultos"] = df["Bultos"] + df["_bultos_azul"]
-        df = df.drop(columns=["_bultos_azul"])
+    # Inicializar flag de huérfano sin DDM (siempre False por defecto)
+    df["_orphan_no_ddm"] = False
+    blue_audit = []
 
-    return df
+    # ── MERGE: sumar bultos azules sobre los normales ─────────────────────────
+    blue_consumed_merge = 0.0
+    blue_consumed_orphans = 0.0
+    blue_discarded_pal_entera = 0.0
+
+    if not blue_agg.empty:
+        # Set de pares (T, SKU) que existen en filas normales
+        normal_keys = set(zip(df["Transporte"], df["Artículo"]))
+
+        # Partir blue_agg en dos: los que tienen match y los huérfanos
+        blue_agg["_has_match"] = blue_agg.apply(
+            lambda r: (r["Transporte"], r["Artículo"]) in normal_keys, axis=1)
+
+        blue_match    = blue_agg[blue_agg["_has_match"]].copy()
+        blue_orphans  = blue_agg[~blue_agg["_has_match"]].copy()
+
+        # ── Caso 1: con match → merge clásico (sumar bultos azules) ───────────
+        if not blue_match.empty:
+            blue_match_clean = blue_match[["Transporte","Artículo","_bultos_azul"]]
+            df = df.merge(blue_match_clean, on=["Transporte", "Artículo"], how="left")
+            df["_bultos_azul"] = df["_bultos_azul"].fillna(0)
+            df["Bultos"] = df["Bultos"] + df["_bultos_azul"]
+            blue_consumed_merge = float(blue_match_clean["_bultos_azul"].sum())
+            df = df.drop(columns=["_bultos_azul"])
+
+            # Trazabilidad: filas sumadas
+            for _, br in blue_match.iterrows():
+                blue_audit.append({
+                    "Transporte": int(br["Transporte"]),
+                    "SKU":        int(br["Artículo"]),
+                    "Descripción": str(blue_desc_map.get(int(br["Artículo"]), "")),
+                    "Bultos azules": float(br["_bultos_azul"]),
+                    "BXP": None,
+                    "Acción": "Sumado a fila normal",
+                })
+
+        # ── Caso 2: huérfanos → decidir según DDM ─────────────────────────────
+        if not blue_orphans.empty and ddm is not None:
+            # Tomar info de reparto y descripción de transporte de cualquier
+            # fila normal del mismo transporte (siempre existe)
+            transp_info = (df.dropna(subset=["Número"])
+                           .drop_duplicates(subset=["Transporte"], keep="first")
+                           .set_index("Transporte")
+                           [["Número","Fecha Mvto","Descripción Transporte","Depósito","Descripción Depósito"]]
+                           .to_dict("index"))
+
+            new_rows = []
+            for _, br in blue_orphans.iterrows():
+                t   = int(br["Transporte"]); sku = int(br["Artículo"])
+                blt = float(br["_bultos_azul"])
+                desc = str(blue_desc_map.get(sku, f"SKU {sku}"))
+
+                d = ddm[ddm["sku"] == sku]
+                bxp = float(d.iloc[0]["bxp"]) if len(d) and pd.notna(d.iloc[0]["bxp"]) else None
+
+                if bxp and bxp > 0 and (blt % bxp == 0):
+                    # Paleta entera exacta → NO agregar (no es picking)
+                    blue_discarded_pal_entera += blt
+                    blue_audit.append({
+                        "Transporte": t, "SKU": sku, "Descripción": desc,
+                        "Bultos azules": blt, "BXP": bxp,
+                        "Acción": "Descartado (paleta entera)",
+                    })
+                    continue
+
+                # Necesita aparecer en PDF: tiene fracción o no tiene BXP
+                if t not in transp_info:
+                    # No hay info de reparto → no se puede asignar a un reparto
+                    # No debería pasar nunca pero registramos
+                    blue_audit.append({
+                        "Transporte": t, "SKU": sku, "Descripción": desc,
+                        "Bultos azules": blt, "BXP": bxp,
+                        "Acción": "ERROR: sin info de reparto",
+                    })
+                    continue
+
+                info = transp_info[t]
+                no_ddm = (bxp is None or bxp <= 0)
+
+                new_row = {col: None for col in df.columns}
+                new_row["Depósito"]              = info.get("Depósito")
+                new_row["Descripción Depósito"]  = info.get("Descripción Depósito")
+                new_row["Número"]                = info["Número"]
+                new_row["Fecha Mvto"]            = info["Fecha Mvto"]
+                new_row["Transporte"]            = t
+                new_row["Descripción Transporte"]= info["Descripción Transporte"]
+                new_row["Artículo"]              = sku
+                new_row["Descripción Artículo"]  = desc
+                new_row["Bultos"]                = blt
+                new_row["Unids"]                 = 0
+                new_row["_orphan_no_ddm"]        = no_ddm
+
+                new_rows.append(new_row)
+                blue_consumed_orphans += blt
+
+                blue_audit.append({
+                    "Transporte": t, "SKU": sku, "Descripción": desc,
+                    "Bultos azules": blt, "BXP": bxp,
+                    "Acción": ("Agregado como picking (SIN BXP — REVISAR)"
+                               if no_ddm else "Agregado como picking (fracción)"),
+                })
+
+            if new_rows:
+                # NOTA: el header del CAR puede tener columnas con nombres
+                # duplicados (espacios non-breaking). Para evitar fallar en
+                # pd.concat con InvalidIndexError, construimos el dataframe
+                # nuevo respetando posiciones de columnas, no nombres.
+                new_df = pd.DataFrame(new_rows)
+                # Reindexar usando solo las columnas que SÍ existen en df
+                # (asignación posicional por nombre único)
+                aligned = pd.DataFrame(columns=df.columns)
+                for nr in new_rows:
+                    aligned_row = []
+                    for col in df.columns:
+                        # Si la columna está repetida tomamos el primer valor encontrado
+                        aligned_row.append(nr.get(col, None))
+                    aligned.loc[len(aligned)] = aligned_row
+                df = pd.concat([df, aligned], ignore_index=True, sort=False)
+
+        elif not blue_orphans.empty and ddm is None:
+            # Sin DDM no podemos decidir → registrar pero no agregar (compat)
+            for _, br in blue_orphans.iterrows():
+                blue_audit.append({
+                    "Transporte": int(br["Transporte"]),
+                    "SKU":        int(br["Artículo"]),
+                    "Descripción": str(blue_desc_map.get(int(br["Artículo"]), "")),
+                    "Bultos azules": float(br["_bultos_azul"]),
+                    "BXP": None,
+                    "Acción": "PERDIDO (sin DDM para decidir)",
+                })
+
+    # ── Invariante de validación ─────────────────────────────────────────────
+    blue_total_out = (blue_consumed_merge + blue_consumed_orphans
+                      + blue_discarded_pal_entera)
+    if blue_total_in > 0 and abs(blue_total_in - blue_total_out) > 0.01 and ddm is not None:
+        raise ValueError(
+            f"Invariante de bloque azul rota: entrada={blue_total_in:.0f} "
+            f"bultos, salida={blue_total_out:.0f} bultos "
+            f"(merge={blue_consumed_merge:.0f} + huérfanos={blue_consumed_orphans:.0f} "
+            f"+ descartados pal entera={blue_discarded_pal_entera:.0f}). "
+            f"Diferencia: {blue_total_in - blue_total_out:.0f} bultos perdidos."
+        )
+
+    return df, blue_audit
 
 def load_frescura(file):
     """
@@ -335,6 +500,7 @@ def process_reparto(rep_df, api, ddm, fr):
         sku = int(r['Artículo'])
         blts_raw = float(r['Bultos']); unids = float(r['Unids'])
         desc = str(r['Descripción Artículo'])
+        orphan_no_ddm = bool(r.get('_orphan_no_ddm', False))
 
         a = api[api['sku'] == sku]
         if len(a):
@@ -367,7 +533,8 @@ def process_reparto(rep_df, api, ddm, fr):
         rows.append({'sku':sku,'desc':desc,'blts_raw':blts_raw,'unids':unids,
                      'blts_pick':blts_pick,'pal_ent':pal_ent,'has_pal':has_pal,
                      'miss_bxp':miss_bxp,'bxp':bxp,'cancha':cancha,
-                     'alm_id':alm_id_i,'alm_det':alm_det,'fecha_s':fecha_s,'row_st':row_st})
+                     'alm_id':alm_id_i,'alm_det':alm_det,'fecha_s':fecha_s,'row_st':row_st,
+                     'orphan_no_ddm':orphan_no_ddm})
     return rows
 
 def build_alm_groups(c_rows):
@@ -485,6 +652,7 @@ def draw_alm_header(c, y, alm_id, alm_det):
 
 def draw_product_row(c, y, r):
     st_ = r['row_st']
+    is_orphan_no_ddm = r.get('orphan_no_ddm', False)
     bg  = DARK_ROW if st_=='RED' else MED_ROW if st_=='YELLOW' else (
           AMBER if r.get('is_sin_cancha') else
           LIGHT_GRAY if r['has_pal'] else colors.white)
@@ -492,21 +660,35 @@ def draw_product_row(c, y, r):
     rfill(c, MARGIN, y, CW, H_ROW, bg, BORDER)
     c.setStrokeColor(BORDER); c.setLineWidth(0.4)
 
-    sku_s  = f"{r['sku']}(!)" if r['miss_bxp'] else str(r['sku'])
+    # Marca de huérfano sin DDM: (*) rojo después del SKU
+    sku_s = str(r['sku'])
+    if is_orphan_no_ddm:
+        sku_s = f"{r['sku']}(*)"
+    elif r['miss_bxp']:
+        sku_s = f"{r['sku']}(!)"
+
     bp     = r['blts_pick']; bp_s = str(int(bp)) if bp == int(bp) else f'{bp:.0f}'
     un_s   = str(int(r['unids']))
     ind    = {'RED':'■','YELLOW':'▲','GREEN':'○'}.get(st_,'')
     venc_s = f'{ind} {r["fecha_s"]}' if r['fecha_s'] else ''
     font   = 'Helvetica-Bold' if st_=='RED' else 'Helvetica'
 
-    cells = [(sku_s,'center'),(r['desc'],'left'),(venc_s,'center'),(bp_s,'center'),(un_s,'center')]
+    # Descripción con aviso embebido si es huérfano sin DDM
+    desc_show = r['desc']
+    if is_orphan_no_ddm:
+        desc_show = f"{r['desc']}  ⚠ SIN BXP EN DDM — REVISAR"
+
+    cells = [(sku_s,'center'),(desc_show,'left'),(venc_s,'center'),(bp_s,'center'),(un_s,'center')]
     x = MARGIN
     for i, ((s, align), w) in enumerate(zip(cells, COL_W)):
         c.rect(x, ry(y+H_ROW), w, H_ROW, fill=0, stroke=1)
+        # Color rojo en SKU y descripción si es huérfano sin DDM
+        col_text = RED_ALERT if (is_orphan_no_ddm and i in (0, 1)) else colors.black
+        font_use = 'Helvetica-Bold' if (is_orphan_no_ddm and i in (0, 1)) else font
         if align == 'center':
-            txt(c, x+w/2, y+9.5, s, font, 9, align='center', mw=w-3)
+            txt(c, x+w/2, y+9.5, s, font_use, 9, col=col_text, align='center', mw=w-3)
         else:
-            txt(c, x+3,   y+9.5, s, font, 9, mw=w-5)
+            txt(c, x+3,   y+9.5, s, font_use, 9, col=col_text, mw=w-5)
         # Subrayado SOLO en columna Bultos (índice 3)
         if r['has_pal'] and i == 3:
             tw = c.stringWidth(s, font, 9)
@@ -706,6 +888,7 @@ def generate_pdf(car_df, api, ddm, fr):
 
     stats = {'repartos':[], 'red':[], 'yellow':[], 'pallet_applied':[],
              'miss_bxp':[], 'no_fecha':[], 'sin_cancha_skus':[],
+             'orphans_no_ddm':[],
              'total_pages':0, 'trace':[]}
 
     for rep_idx, (numero, rep_df) in enumerate(car_df.groupby('Número', sort=False)):
@@ -725,6 +908,7 @@ def generate_pdf(car_df, api, ddm, fr):
                 'Almacén': r['alm_id'], 'Detalle Almacén': r['alm_det'],
                 'Cancha': r['cancha'], 'Bultos CAR': r['blts_raw'],
                 'A pickear': r['blts_pick'],
+                'Huérfano sin DDM': '⚠' if r.get('orphan_no_ddm') else '',
             })
 
         pv1 = pall_values['CANCHA I']; frac1 = pv1 - int(pv1)
@@ -753,6 +937,8 @@ def generate_pdf(car_df, api, ddm, fr):
             if r['has_pal']:           stats['pallet_applied'].append(r['sku'])
             if r['miss_bxp']:          stats['miss_bxp'].append(r['sku'])
             if not r['fecha_s']:       stats['no_fecha'].append(r['sku'])
+            if r.get('orphan_no_ddm'): stats['orphans_no_ddm'].append(
+                f"{r['sku']} — {r['desc']} (T{transport}, R{numero})")
 
     c.save(); buf.seek(0)
     stats['total_pages'] = pc['n']
@@ -773,7 +959,7 @@ def main():
     st.markdown("""
     <div class='tbox'>
       <h2>📦 Planilla de Carga — Generador Automático</h2>
-      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.7</b> (fix canchas I:M + debug)</p>
+      <p>Beccacece Hnos SA &nbsp;|&nbsp; Almacén Digital 3.0 &nbsp;|&nbsp; <b>v3.8</b> (fix bloque azul huérfanos + auditoría)</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
@@ -783,8 +969,9 @@ def main():
     if car_file and fr_file:
         with st.spinner('⚙️ Procesando…'):
             try:
-                car_df              = load_car(car_file)
+                # IMPORTANTE: Frescura PRIMERO (necesitamos ddm para procesar CAR)
                 api, ddm, fr, diag  = load_frescura(fr_file)
+                car_df, blue_audit  = load_car(car_file, ddm=ddm)
 
                 # ── DEBUG PREVIO A GENERAR PDF ──────────────────────────────
                 with st.expander('🔍 Debug — Mapeo SKU → Almacén → Cancha (revisar ANTES de descargar)', expanded=True):
@@ -805,6 +992,37 @@ def main():
                     cnt = api['cancha'].value_counts().reset_index()
                     cnt.columns = ['Cancha', 'SKUs']
                     st.dataframe(cnt, use_container_width=True, hide_index=True)
+
+                # ── AUDITORÍA DE BLOQUE AZUL (NUEVO v3.8) ─────────────────────
+                with st.expander('🔎 Auditoría del bloque azul (filas 2-41 del CAR) — trazabilidad completa', expanded=True):
+                    if blue_audit:
+                        ba_df = pd.DataFrame(blue_audit)
+                        # Resumen por acción
+                        resumen = ba_df.groupby('Acción').agg(
+                            Filas=('SKU', 'count'),
+                            Bultos=('Bultos azules', 'sum')
+                        ).reset_index()
+                        st.markdown("**Resumen por acción tomada:**")
+                        st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+                        # Detalle completo
+                        st.markdown("**Detalle de cada fila azul:**")
+                        st.dataframe(ba_df, use_container_width=True, hide_index=True)
+
+                        # Alertar si hay huérfanos sin DDM
+                        sin_ddm = ba_df[ba_df['Acción'].str.contains('SIN BXP', na=False)]
+                        if len(sin_ddm):
+                            st.warning(
+                                f'⚠ {len(sin_ddm)} fila(s) huérfana(s) del bloque azul SIN BXP en DDM. '
+                                f'Se cargaron como picking pero hay que actualizar DDM. '
+                                f'Aparecen marcadas con (*) en el PDF.'
+                            )
+
+                        # Confirmar invariante
+                        total_in = ba_df['Bultos azules'].sum()
+                        st.success(f'✅ Invariante OK: {total_in:.0f} bultos del bloque azul procesados sin pérdidas.')
+                    else:
+                        st.info('Sin filas en el bloque azul para este CAR.')
 
                 pdf_bytes, stats = generate_pdf(car_df, api, ddm, fr)
 
@@ -834,7 +1052,7 @@ def main():
 
                 with st.expander('📋 Validación pre-generación', expanded=False):
                     rep_ids = ' | '.join(str(r['numero']) for r in stats['repartos'])
-                    st.code(f"""VALIDACIÓN PRE-GENERACIÓN — v3.4
+                    st.code(f"""VALIDACIÓN PRE-GENERACIÓN — v3.8
 ──────────────────────────────────────────────────────
 ✅ Repartos            : {len(stats['repartos'])}  [{rep_ids}]
 ✅ Páginas totales     : {stats['total_pages']}
@@ -844,6 +1062,7 @@ def main():
 ⚠️  Sin BXP            : {fmt(stats['miss_bxp'])}
 ⚠️  Sin fecha Frescura : {fmt(stats['no_fecha'])}
 ⚠️  SIN CANCHA         : {fmt(stats['sin_cancha_skus'])}
+(*) Huérfanos sin DDM : {fmt(stats['orphans_no_ddm'])}
 ──────────────────────────────────────────────────────""", language='')
             except Exception as e:
                 st.error(f'❌ Error: {e}'); st.exception(e)
